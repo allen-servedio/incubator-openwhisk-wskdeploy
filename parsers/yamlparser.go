@@ -173,7 +173,8 @@ type Rule struct {
 	Action string `yaml:"action"` //used in manifest.yaml
 	Rule   string `yaml:"rule"`   //used in manifest.yaml
 	//mapping to wsk.Rule.Name
-	Name string
+	Name        string
+	Annotations map[string]interface{} `yaml:"annotations,omitempty"`
 }
 
 type Repository struct {
@@ -238,7 +239,7 @@ func convertPackageName(packageMap map[string]Package) map[string]Package {
 	packages := make(map[string]Package)
 	for packName, depPacks := range packageMap {
 		name := packName
-		packageName := wskenv.GetEnvVar(packName)
+		packageName := wskenv.InterpolateStringWithEnvVar(packName)
 		if str, ok := packageName.(string); ok {
 			name = str
 		}
@@ -358,4 +359,61 @@ func (pkg *Package) GetApis() []*whisk.Api {
 		}
 	}
 	return apis
+}
+
+//********************YAML functions*************************//
+func (yaml *YAML) ComposeParsersPackage(wskpag whisk.Package) *Package {
+	pkg := new(Package)
+	pkg.Packagename = wskpag.Name
+	pkg.Namespace = wskpag.Namespace
+	pkg.Version = wskpag.Version
+
+	for _, keyval := range wskpag.Parameters {
+		param := new(Parameter)
+		param.Value = keyval.Value
+		pkg.Inputs[keyval.Key] = *param
+	}
+
+	return pkg
+}
+
+func (yaml *YAML) ComposeParsersAction(wskact whisk.Action) *Action {
+	action := new(Action)
+	action.Name = wskact.Name
+	action.Namespace = wskact.Namespace
+	action.Version = wskact.Version
+	action.Runtime = wskact.Exec.Kind
+
+	action.Inputs = make(map[string]Parameter)
+	for _, keyval := range wskact.Parameters {
+		param := new(Parameter)
+		param.Value = keyval.Value
+		action.Inputs[keyval.Key] = *param
+	}
+
+	return action
+}
+
+func (yaml *YAML) ComposeParsersTrigger(wsktrg whisk.Trigger) *Trigger {
+	trigger := new(Trigger)
+	trigger.Name = wsktrg.Name
+	trigger.Namespace = wsktrg.Namespace
+
+	for _, keyval := range wsktrg.Parameters {
+		param := new(Parameter)
+		param.Value = keyval.Value
+		trigger.Inputs[keyval.Key] = *param
+	}
+
+	return trigger
+}
+
+func (yaml *YAML) ComposeParsersRule(wskrule whisk.Rule) *Rule {
+	rule := new(Rule)
+	rule.Name = wskrule.Name
+
+	rule.Action = wskrule.Action.(map[string]interface{})["name"].(string)
+	rule.Trigger = wskrule.Trigger.(map[string]interface{})["name"].(string)
+
+	return rule
 }

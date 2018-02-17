@@ -38,6 +38,7 @@ wskdeploy
 .vscode
 .project
 .settings
+Packages/
 
 # Gradle
 .gradle

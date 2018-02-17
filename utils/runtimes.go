@@ -22,19 +22,24 @@ import (
 	"encoding/json"
 	"github.com/apache/incubator-openwhisk-client-go/whisk"
 	"github.com/apache/incubator-openwhisk-wskdeploy/wski18n"
+	"github.com/apache/incubator-openwhisk-wskdeploy/wskprint"
 	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
 )
 
-const NODEJS_FILE_EXTENSION = "js"
-const SWIFT_FILE_EXTENSION = "swift"
-const PYTHON_FILE_EXTENSION = "py"
-const JAVA_FILE_EXTENSION = "java"
-const JAR_FILE_EXTENSION = "jar"
-const PHP_FILE_EXTENSION = "php"
-const ZIP_FILE_EXTENSION = "zip"
+const (
+	NODEJS_FILE_EXTENSION   = "js"
+	SWIFT_FILE_EXTENSION    = "swift"
+	PYTHON_FILE_EXTENSION   = "py"
+	JAVA_FILE_EXTENSION     = "java"
+	JAR_FILE_EXTENSION      = "jar"
+	PHP_FILE_EXTENSION      = "php"
+	ZIP_FILE_EXTENSION      = "zip"
+	HTTP_CONTENT_TYPE_KEY   = "Content-Type"
+	HTTP_CONTENT_TYPE_VALUE = "application/json; charset=UTF-8"
+)
 
 // Structs used to denote the OpenWhisk Runtime information
 type Limit struct {
@@ -68,15 +73,15 @@ type OpenWhiskInfo struct {
 var FileExtensionRuntimeKindMap map[string]string
 var SupportedRunTimes map[string][]string
 var DefaultRunTimes map[string]string
+var FileRuntimeExtensionsMap map[string]string
 
 // We could get the openwhisk info from bluemix through running the command
 // `curl -k https://openwhisk.ng.bluemix.net`
 // hard coding it here in case of network unavailable or failure.
 func ParseOpenWhisk(apiHost string) (op OpenWhiskInfo, err error) {
-	// TODO() create HTTP header constants and use them
-	ct := "application/json; charset=UTF-8"
-	req, _ := http.NewRequest("GET", "https://"+apiHost, nil)
-	req.Header.Set("Content-Type", ct)
+	url := "https://" + apiHost
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set(HTTP_CONTENT_TYPE_KEY, HTTP_CONTENT_TYPE_VALUE)
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
@@ -103,16 +108,16 @@ func ParseOpenWhisk(apiHost string) (op OpenWhiskInfo, err error) {
 	}
 
 	// Local openwhisk deployment sometimes only returns "application/json" as the content type
-	// TODO() create HTTP header constants and use them
-	if err != nil || !strings.Contains(ct, res.Header.Get("Content-Type")) {
+	if err != nil || !strings.Contains(HTTP_CONTENT_TYPE_VALUE, res.Header.Get(HTTP_CONTENT_TYPE_KEY)) {
 		stdout := wski18n.T(wski18n.ID_MSG_UNMARSHAL_LOCAL)
-		whisk.Debug(whisk.DbgInfo, stdout)
+		wskprint.PrintOpenWhiskInfo(stdout)
 		err = json.Unmarshal(RUNTIME_DETAILS, &op)
 	} else {
 		b, _ := ioutil.ReadAll(res.Body)
 		if b != nil && len(b) > 0 {
-			stdout := wski18n.T(wski18n.ID_MSG_UNMARSHAL_NETWORK)
-			whisk.Debug(whisk.DbgInfo, stdout)
+			stdout := wski18n.T(wski18n.ID_MSG_UNMARSHAL_NETWORK_X_url_X,
+				map[string]interface{}{"url": url})
+			wskprint.PrintOpenWhiskInfo(stdout)
 			err = json.Unmarshal(b, &op)
 		}
 	}
@@ -160,6 +165,29 @@ func FileExtensionRuntimes(op OpenWhiskInfo) (ext map[string]string) {
 		} else if strings.Contains(k, JAVA_FILE_EXTENSION) {
 			ext[JAVA_FILE_EXTENSION] = k
 			ext[JAR_FILE_EXTENSION] = k
+		}
+	}
+	return
+}
+
+func FileRuntimeExtensions(op OpenWhiskInfo) (rte map[string]string) {
+	rte = make(map[string]string)
+
+	for k, v := range op.Runtimes {
+		for i := range v {
+			if !v[i].Deprecated {
+				if strings.Contains(k, NODEJS_FILE_EXTENSION) {
+					rte[v[i].Kind] = NODEJS_FILE_EXTENSION
+				} else if strings.Contains(k, PYTHON_FILE_EXTENSION) {
+					rte[v[i].Kind] = PYTHON_FILE_EXTENSION
+				} else if strings.Contains(k, SWIFT_FILE_EXTENSION) {
+					rte[v[i].Kind] = SWIFT_FILE_EXTENSION
+				} else if strings.Contains(k, PHP_FILE_EXTENSION) {
+					rte[v[i].Kind] = PHP_FILE_EXTENSION
+				} else if strings.Contains(k, JAVA_FILE_EXTENSION) {
+					rte[v[i].Kind] = JAVA_FILE_EXTENSION
+				}
+			}
 		}
 	}
 	return

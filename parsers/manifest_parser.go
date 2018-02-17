@@ -162,6 +162,7 @@ func (dm *YAMLParser) ComposeDependencies(pkg Package, projectPath string, fileP
 			// TODO() define const for the protocol prefix, etc.
 			if !strings.HasPrefix(location, "https://") && !strings.HasPrefix(location, "http://") {
 				location = "https://" + dependency.Location
+				location = wskenv.InterpolateStringWithEnvVar(location).(string)
 			}
 
 			isBinding = false
@@ -190,7 +191,7 @@ func (dm *YAMLParser) ComposeDependencies(pkg Package, projectPath string, fileP
 		for name, value := range dependency.Annotations {
 			var keyVal whisk.KeyValue
 			keyVal.Key = name
-			keyVal.Value = wskenv.GetEnvVar(value)
+			keyVal.Value = wskenv.InterpolateStringWithEnvVar(value)
 
 			keyValArrAnot = append(keyValArrAnot, keyVal)
 		}
@@ -315,7 +316,7 @@ func (dm *YAMLParser) ComposePackage(pkg Package, packageName string, filePath s
 	for name, value := range pkg.Annotations {
 		var keyVal whisk.KeyValue
 		keyVal.Key = name
-		keyVal.Value = wskenv.GetEnvVar(value)
+		keyVal.Value = wskenv.InterpolateStringWithEnvVar(value)
 		listOfAnnotations = append(listOfAnnotations, keyVal)
 	}
 	if len(listOfAnnotations) > 0 {
@@ -384,7 +385,7 @@ func (dm *YAMLParser) ComposeSequences(namespace string, sequences map[string]Se
 		for name, value := range sequence.Annotations {
 			var keyVal whisk.KeyValue
 			keyVal.Key = name
-			keyVal.Value = wskenv.GetEnvVar(value)
+			keyVal.Value = wskenv.InterpolateStringWithEnvVar(value)
 
 			keyValArr = append(keyValArr, keyVal)
 		}
@@ -647,7 +648,7 @@ func (dm *YAMLParser) ComposeActions(filePath string, actions map[string]Action,
 		for name, value := range action.Annotations {
 			var keyVal whisk.KeyValue
 			keyVal.Key = name
-			keyVal.Value = wskenv.GetEnvVar(value)
+			keyVal.Value = wskenv.InterpolateStringWithEnvVar(value)
 			listOfAnnotations = append(listOfAnnotations, keyVal)
 		}
 		if len(listOfAnnotations) > 0 {
@@ -774,6 +775,10 @@ func (dm *YAMLParser) ComposeTriggers(filePath string, pkg Package, ma whisk.Key
 			trigger.Feed = trigger.Source
 		}
 
+		// replacing env. variables here in the trigger feed name
+		// to support trigger feed with $READ_FROM_ENV_TRIGGER_FEED
+		trigger.Feed = wskenv.InterpolateStringWithEnvVar(trigger.Feed).(string)
+
 		keyValArr := make(whisk.KeyValueArr, 0)
 		if trigger.Feed != "" {
 			var keyVal whisk.KeyValue
@@ -810,7 +815,7 @@ func (dm *YAMLParser) ComposeTriggers(filePath string, pkg Package, ma whisk.Key
 		for name, value := range trigger.Annotations {
 			var keyVal whisk.KeyValue
 			keyVal.Key = name
-			keyVal.Value = wskenv.GetEnvVar(value)
+			keyVal.Value = wskenv.InterpolateStringWithEnvVar(value)
 			listOfAnnotations = append(listOfAnnotations, keyVal)
 		}
 		if len(listOfAnnotations) > 0 {
@@ -827,12 +832,12 @@ func (dm *YAMLParser) ComposeTriggers(filePath string, pkg Package, ma whisk.Key
 	return t1, nil
 }
 
-func (dm *YAMLParser) ComposeRulesFromAllPackages(manifest *YAML) ([]*whisk.Rule, error) {
+func (dm *YAMLParser) ComposeRulesFromAllPackages(manifest *YAML, ma whisk.KeyValue) ([]*whisk.Rule, error) {
 	var rules []*whisk.Rule = make([]*whisk.Rule, 0)
 	manifestPackages := make(map[string]Package)
 
 	if manifest.Package.Packagename != "" {
-		return dm.ComposeRules(manifest.Package, manifest.Package.Packagename)
+		return dm.ComposeRules(manifest.Package, manifest.Package.Packagename, ma)
 	} else {
 		if len(manifest.Packages) != 0 {
 			manifestPackages = manifest.Packages
@@ -842,7 +847,7 @@ func (dm *YAMLParser) ComposeRulesFromAllPackages(manifest *YAML) ([]*whisk.Rule
 	}
 
 	for n, p := range manifestPackages {
-		r, err := dm.ComposeRules(p, n)
+		r, err := dm.ComposeRules(p, n, ma)
 		if err == nil {
 			rules = append(rules, r...)
 		} else {
@@ -852,16 +857,38 @@ func (dm *YAMLParser) ComposeRulesFromAllPackages(manifest *YAML) ([]*whisk.Rule
 	return rules, nil
 }
 
-func (dm *YAMLParser) ComposeRules(pkg Package, packageName string) ([]*whisk.Rule, error) {
+func (dm *YAMLParser) ComposeRules(pkg Package, packageName string, ma whisk.KeyValue) ([]*whisk.Rule, error) {
 	var r1 []*whisk.Rule = make([]*whisk.Rule, 0)
 
 	for _, rule := range pkg.GetRuleList() {
-		wskrule := rule.ComposeWskRule()
+		wskrule := new(whisk.Rule)
+		wskrule.Name = wskenv.ConvertSingleName(rule.Name)
+		//wskrule.Namespace = rule.Namespace
+		pub := false
+		wskrule.Publish = &pub
+		wskrule.Trigger = wskenv.ConvertSingleName(rule.Trigger)
+		wskrule.Action = wskenv.ConvertSingleName(rule.Action)
 		act := strings.TrimSpace(wskrule.Action.(string))
 		if !strings.ContainsRune(act, '/') && !strings.HasPrefix(act, packageName+"/") {
 			act = path.Join(packageName, act)
 		}
 		wskrule.Action = act
+		listOfAnnotations := make(whisk.KeyValueArr, 0)
+		for name, value := range rule.Annotations {
+			var keyVal whisk.KeyValue
+			keyVal.Key = name
+			keyVal.Value = wskenv.InterpolateStringWithEnvVar(value)
+			listOfAnnotations = append(listOfAnnotations, keyVal)
+		}
+		if len(listOfAnnotations) > 0 {
+			wskrule.Annotations = append(wskrule.Annotations, listOfAnnotations...)
+		}
+
+		// add managed annotations if its a managed deployment
+		if utils.Flags.Managed {
+			wskrule.Annotations = append(wskrule.Annotations, ma)
+		}
+
 		r1 = append(r1, wskrule)
 	}
 	return r1, nil

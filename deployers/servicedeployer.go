@@ -81,16 +81,15 @@ func NewDeploymentPackage() *DeploymentPackage {
 //   3. Collect information about the source code files in the working directory
 //   4. Create a deployment plan to create OpenWhisk service
 type ServiceDeployer struct {
-	ProjectName     string
-	Deployment      *DeploymentProject
-	Client          *whisk.Client
-	mt              sync.RWMutex
-	RootPackageName string
-	IsInteractive   bool
-	IsDefault       bool
-	ManifestPath    string
-	ProjectPath     string
-	DeploymentPath  string
+	ProjectName    string
+	Deployment     *DeploymentProject
+	Client         *whisk.Client
+	mt             sync.RWMutex
+	IsInteractive  bool
+	IsDefault      bool
+	ManifestPath   string
+	ProjectPath    string
+	DeploymentPath string
 	// whether to deploy the action under the package
 	DeployActionInPackage bool
 	InteractiveChoice     bool
@@ -132,7 +131,6 @@ func (deployer *ServiceDeployer) ConstructDeploymentPlan() error {
 		return err
 	}
 
-	deployer.RootPackageName = manifest.Package.Packagename
 	deployer.ProjectName = manifest.GetProject().Name
 
 	// Generate Managed Annotations if its marked as a Managed Deployment
@@ -155,7 +153,7 @@ func (deployer *ServiceDeployer) ConstructDeploymentPlan() error {
 		}
 	}
 
-	manifestReader.InitRootPackage(manifestParser, manifest, deployer.ManagedAnnotation)
+	manifestReader.InitPackages(manifestParser, manifest, deployer.ManagedAnnotation)
 
 	if deployer.IsDefault == true {
 		fileReader := NewFileSystemReader(deployer)
@@ -236,8 +234,7 @@ func (deployer *ServiceDeployer) ConstructUnDeploymentPlan() (*DeploymentProject
 		return deployer.Deployment, err
 	}
 
-	deployer.RootPackageName = manifest.Package.Packagename
-	manifestReader.InitRootPackage(manifestParser, manifest, whisk.KeyValue{})
+	manifestReader.InitPackages(manifestParser, manifest, whisk.KeyValue{})
 
 	// process file system
 	if deployer.IsDefault == true {
@@ -453,6 +450,19 @@ func (deployer *ServiceDeployer) DeployDependencies() error {
 					return err
 				}
 
+				dependentPackages := []string{}
+				for k := range depServiceDeployer.Deployment.Packages {
+					dependentPackages = append(dependentPackages, k)
+				}
+
+				if len(dependentPackages) > 1 {
+					errMessage := "GitHub dependency " + depName + " has multiple packages in manifest file: " +
+						strings.Join(dependentPackages, ", ") + ". " +
+						"One GitHub dependency can only be associated with single package in manifest file." +
+						"There is no way to reference actions from multiple packages of any GitHub dependencies."
+					return wskderrors.NewYAMLFileFormatError(deployer.ManifestPath, errMessage)
+				}
+
 				if err := depServiceDeployer.deployAssets(); err != nil {
 					errString := wski18n.T(wski18n.ID_MSG_DEPENDENCY_DEPLOYMENT_FAILURE_X_name_X,
 						map[string]interface{}{wski18n.KEY_NAME: depName})
@@ -460,16 +470,17 @@ func (deployer *ServiceDeployer) DeployDependencies() error {
 					return err
 				}
 
-				// if the RootPackageName is different from depName
-				// create a binding to the origin package
-				if depServiceDeployer.RootPackageName != depName {
+				// if the dependency name in the original package
+				// is different from the package name in the manifest
+				// file of dependent github repo, create a binding to the origin package
+				if ok := depServiceDeployer.Deployment.Packages[depName]; ok == nil {
 					bindingPackage := new(whisk.BindingPackage)
 					bindingPackage.Namespace = pack.Package.Namespace
 					bindingPackage.Name = depName
 					pub := false
 					bindingPackage.Publish = &pub
 
-					qName, err := utils.ParseQualifiedName(depServiceDeployer.RootPackageName, depServiceDeployer.Deployment.Packages[depServiceDeployer.RootPackageName].Package.Namespace)
+					qName, err := utils.ParseQualifiedName(dependentPackages[0], depServiceDeployer.Deployment.Packages[dependentPackages[0]].Package.Namespace)
 					if err != nil {
 						return err
 					}
@@ -603,9 +614,44 @@ func (deployer *ServiceDeployer) RefreshManagedTriggers(ma map[string]interface{
 	return nil
 }
 
-// TODO() engage community to allow metadata (annotations) on Rules
 // TODO() display "update" | "synced" messages pre/post
 func (deployer *ServiceDeployer) RefreshManagedRules(ma map[string]interface{}) error {
+	options := whisk.RuleListOptions{}
+	// Get list of rules in your namespace
+	rules, _, err := deployer.Client.Rules.List(&options)
+	if err != nil {
+		return err
+	}
+	// iterate over the list of rules to determine whether any of them was part of managed project
+	// and now deleted from manifest file we can determine that from the managed annotation
+	// If a rule has attached managed annotation with the project name equals to the current project name
+	// but the project hash is different (project hash differs since the rule is deleted from the manifest file)
+	for _, rule := range rules {
+		// rule has attached managed annotation
+		if a := rule.Annotations.GetValue(utils.MANAGED); a != nil {
+			// decode the JSON blob and retrieve __OW_PROJECT_NAME and __OW_PROJECT_HASH
+			ta := a.(map[string]interface{})
+			if ta[utils.OW_PROJECT_NAME] == ma[utils.OW_PROJECT_NAME] && ta[utils.OW_PROJECT_HASH] != ma[utils.OW_PROJECT_HASH] {
+				// we have found a trigger which was earlier part of the current project
+				output := wski18n.T(wski18n.ID_MSG_MANAGED_FOUND_DELETED_X_key_X_name_X_project_X,
+					map[string]interface{}{
+						wski18n.KEY_KEY:     parsers.YAML_KEY_RULE,
+						wski18n.KEY_NAME:    rule.Name,
+						wski18n.KEY_PROJECT: ma[utils.OW_PROJECT_NAME]})
+				wskprint.PrintOpenWhiskWarning(output)
+
+				var err error
+				err = retry(DEFAULT_ATTEMPTS, DEFAULT_INTERVAL, func() error {
+					_, err := deployer.Client.Rules.Delete(rule.Name)
+					return err
+				})
+
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -879,9 +925,6 @@ func (deployer *ServiceDeployer) createRule(rule *whisk.Rule) error {
 	// if it contains a slash, then the action is qualified by a package name
 	if strings.Contains(rule.Action.(string), "/") {
 		rule.Action = deployer.getQualifiedName(rule.Action.(string), deployer.ClientConfig.Namespace)
-	} else {
-		// if not, we assume the action is inside the root package
-		rule.Action = deployer.getQualifiedName(strings.Join([]string{deployer.RootPackageName, rule.Action.(string)}, "/"), deployer.ClientConfig.Namespace)
 	}
 
 	var err error
@@ -1055,8 +1098,13 @@ func (deployer *ServiceDeployer) UnDeployDependencies() error {
 					return err
 				}
 
+				dependentPackages := []string{}
+				for k := range depServiceDeployer.Deployment.Packages {
+					dependentPackages = append(dependentPackages, k)
+				}
+
 				// delete binding pkg if the origin package name is different
-				if depServiceDeployer.RootPackageName != depName {
+				if ok := depServiceDeployer.Deployment.Packages[depName]; ok == nil {
 					if _, _, ok := deployer.Client.Packages.Get(depName); ok == nil {
 						var err error
 						var response *http.Response
